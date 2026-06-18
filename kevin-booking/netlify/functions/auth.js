@@ -1,9 +1,9 @@
 export default async (req, context) => {
-  const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-  const redirectUri = "https://hillkevin-booking.netlify.app/api/auth/callback";
+  const clientId = process.env.GOOGLE_CLIENT_ID;
+  const redirectUri = process.env.URL + "/api/auth/callback";
   
   const params = new URLSearchParams({
-    client_id: GOOGLE_CLIENT_ID,
+    client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
     scope: "https://www.googleapis.com/auth/calendar",
