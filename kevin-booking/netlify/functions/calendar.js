@@ -1,149 +1,103 @@
-export default async (req, context) => {
-  // Handle CORS
-  if (req.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
-      },
-    });
-  }
+async function getAccessToken() {
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
+      grant_type: "refresh_token",
+    }),
+  });
+  const data = await res.json();
+  return data.access_token;
+}
 
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-    });
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+export default async (req) => {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: CORS });
+
+  const body = await req.json();
+  const { action, date, start, end, title, location, description, attendeeEmail, addMeet } = body;
+  const calendarId = process.env.GOOGLE_CALENDAR_ID;
+
+  if (!process.env.GOOGLE_REFRESH_TOKEN) {
+    return new Response(JSON.stringify({
+      error: "not_configured",
+      authUrl: "/api/auth/login"
+    }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
   try {
-    const body = await req.json();
-    const { action, date, start, end, title, location, description, attendeeEmail, addMeet } = body;
-
-    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-    const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID;
-
-    if (!ANTHROPIC_API_KEY) {
-      return new Response(JSON.stringify({ error: "API key not configured" }), {
-        status: 500,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-      });
-    }
-
-    let prompt = "";
+    const accessToken = await getAccessToken();
 
     if (action === "check_availability") {
-      prompt = `List all events on my Google Calendar (calendar ID: ${GOOGLE_CALENDAR_ID}) between ${date}T00:00:00 and ${date}T23:59:59. Return ONLY a JSON array of busy periods like: [{"start":"ISO datetime","end":"ISO datetime"}]. No other text.`;
-    } else if (action === "book") {
-      prompt = `Create a Google Calendar event on calendar ${GOOGLE_CALENDAR_ID} with these details:
-Title: "${title}"
-Start: ${start}
-End: ${end}
-Location: ${location}
-Description: ${description}
-Attendees: ${attendeeEmail}
-${addMeet ? "Add a Google Meet video conference link." : ""}
-Return ONLY JSON: {"success": true, "meetLink": "..."} or {"success": false, "error": "..."}. No other text.`;
-    }
+      const dayStart = `${date}T00:00:00Z`;
+      const dayEnd = `${date}T23:59:59Z`;
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        mcp_servers: [
-          {
-            type: "url",
-            url: "https://calendarmcp.googleapis.com/mcp/v1",
-            name: "google-calendar",
-          },
-        ],
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-
-    const data = await response.json();
-
-    // Extract results
-    const textBlocks = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-    const toolResults = (data.content || []).filter(b => b.type === "mcp_tool_result");
-    const hadToolUse = (data.content || []).some(b => b.type === "mcp_tool_use");
-
-    if (action === "check_availability") {
-      let busy = [];
-
-      for (const block of toolResults) {
-        const text = block?.content?.[0]?.text || "";
-        try {
-          const parsed = JSON.parse(text);
-          const items = parsed.items || parsed.events || parsed || [];
-          if (Array.isArray(items)) {
-            items.forEach(ev => {
-              const s = ev.start?.dateTime || ev.start?.date;
-              const e = ev.end?.dateTime || ev.end?.date;
-              if (s && e) busy.push({ start: s, end: e });
-            });
-          }
-        } catch {}
-      }
-
-      if (busy.length === 0 && textBlocks) {
-        try {
-          const clean = textBlocks.replace(/```json|```/g, "").trim();
-          const parsed = JSON.parse(clean);
-          const items = Array.isArray(parsed) ? parsed : (parsed.items || parsed.events || []);
-          items.forEach(ev => {
-            const s = ev.start?.dateTime || ev.start?.date || ev.start;
-            const e = ev.end?.dateTime || ev.end?.date || ev.end;
-            if (s && e) busy.push({ start: s, end: e });
-          });
-        } catch {}
-      }
+      const res = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?timeMin=${dayStart}&timeMax=${dayEnd}&singleEvents=true`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const data = await res.json();
+      const busy = (data.items || []).map(ev => ({
+        start: ev.start?.dateTime || ev.start?.date,
+        end: ev.end?.dateTime || ev.end?.date,
+      })).filter(b => b.start && b.end);
 
       return new Response(JSON.stringify({ busy }), {
         status: 200,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        headers: { ...CORS, "Content-Type": "application/json" },
       });
     }
 
     if (action === "book") {
-      let meetLink = "";
+      const event = {
+        summary: title,
+        location,
+        description,
+        start: { dateTime: start, timeZone: "America/Chicago" },
+        end: { dateTime: end, timeZone: "America/Chicago" },
+        attendees: [{ email: attendeeEmail }],
+        sendUpdates: "all",
+      };
 
-      if (toolResults.length > 0) {
-        const resultText = toolResults.map(r => r.content?.[0]?.text || "").join("");
-        const m = resultText.match(/https:\/\/meet\.google\.com\/[a-z\-]+/);
-        if (m) meetLink = m[0];
-        return new Response(JSON.stringify({ success: true, meetLink }), {
-          status: 200,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-        });
+      if (addMeet) {
+        event.conferenceData = {
+          createRequest: { requestId: Math.random().toString(36).substring(7) }
+        };
       }
 
-      if (hadToolUse) {
+      const res = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?conferenceDataVersion=1&sendUpdates=all`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(event),
+        }
+      );
+
+      const data = await res.json();
+
+      if (data.id) {
+        const meetLink = data.conferenceData?.entryPoints?.find(e => e.entryPointType === "video")?.uri || "";
         return new Response(JSON.stringify({ success: true, meetLink }), {
           status: 200,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+          headers: { ...CORS, "Content-Type": "application/json" },
         });
-      }
-
-      try {
-        const clean = textBlocks.replace(/```json|```/g, "").trim();
-        const parsed = JSON.parse(clean);
-        return new Response(JSON.stringify(parsed), {
+      } else {
+        return new Response(JSON.stringify({ success: false, error: data.error?.message || "Booking failed" }), {
           status: 200,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-        });
-      } catch {
-        return new Response(JSON.stringify({ success: false, error: "Could not confirm booking" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+          headers: { ...CORS, "Content-Type": "application/json" },
         });
       }
     }
@@ -151,11 +105,9 @@ Return ONLY JSON: {"success": true, "meetLink": "..."} or {"success": false, "er
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message }), {
       status: 500,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+      headers: { ...CORS, "Content-Type": "application/json" },
     });
   }
 };
 
-export const config = {
-  path: "/api/calendar",
-};
+export const config = { path: "/api/calendar" };
