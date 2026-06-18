@@ -13,15 +13,15 @@ const LOCATION_TYPES = [
   { id: "inperson", label: "In Person", icon: "📍" },
 ];
 
-// Kevin's hours: 8 AM – 4 PM (slots on the hour)
 const ALL_HOURS = [8, 9, 10, 11, 12, 13, 14, 15, 16];
-
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DAY_NAMES = ["Su","Mo","Tu","We","Th","Fr","Sa"];
 
 function getDaysInMonth(year, month) { return new Date(year, month + 1, 0).getDate(); }
 function getFirstDayOfMonth(year, month) { return new Date(year, month, 1).getDay(); }
 const formatHour = (h) => h === 12 ? "12:00 PM" : h < 12 ? `${h}:00 AM` : `${h - 12}:00 PM`;
+
+const API = "/api/calendar";
 
 export default function BookingPage() {
   const today = new Date();
@@ -37,9 +37,7 @@ export default function BookingPage() {
   const [loading, setLoading] = useState(false);
   const [bookedEvent, setBookedEvent] = useState(null);
   const [error, setError] = useState("");
-
-  // Calendar conflict state
-  const [busySlots, setBusySlots] = useState([]); // array of {start, end} Date objects
+  const [busySlots, setBusySlots] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
 
   const daysInMonth = getDaysInMonth(calYear, calMonth);
@@ -52,85 +50,38 @@ export default function BookingPage() {
   const prevMonth = () => { if (calMonth === 0) { setCalMonth(11); setCalYear(y => y - 1); } else setCalMonth(m => m - 1); setSelectedDay(null); setSelectedHour(null); setBusySlots([]); };
   const nextMonth = () => { if (calMonth === 11) { setCalMonth(0); setCalYear(y => y + 1); } else setCalMonth(m => m + 1); setSelectedDay(null); setSelectedHour(null); setBusySlots([]); };
 
-  // Fetch busy times from Google Calendar via Anthropic API when a day is selected
   useEffect(() => {
     if (!selectedDay) return;
     setLoadingSlots(true);
     setBusySlots([]);
     setSelectedHour(null);
 
-    const dayStart = new Date(calYear, calMonth, selectedDay, 0, 0, 0).toISOString();
-    const dayEnd   = new Date(calYear, calMonth, selectedDay, 23, 59, 59).toISOString();
+    const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(selectedDay).padStart(2, "0")}`;
 
-    fetch("https://api.anthropic.com/v1/messages", {
+    fetch(API, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        mcp_servers: [{ type: "url", url: "https://calendarmcp.googleapis.com/mcp/v1", name: "google-calendar" }],
-        system: `You are a calendar assistant. List all events for the given day using the Google Calendar list_events tool. Respond ONLY with a JSON array of busy periods: [{"start":"ISO","end":"ISO"},...]. No other text, no markdown.`,
-        messages: [{ role: "user", content: `List all events on my calendar between ${dayStart} and ${dayEnd}. Return only their start and end times as JSON.` }]
+      body: JSON.stringify({ action: "check_availability", date: dateStr }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        setBusySlots((data.busy || []).map(b => ({ start: new Date(b.start), end: new Date(b.end) })));
       })
-    })
-    .then(r => r.json())
-    .then(data => {
-      // Try to extract JSON from text or tool results
-      const textBlocks = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-      const toolResults = (data.content || []).filter(b => b.type === "mcp_tool_result");
-
-      let busy = [];
-
-      // Try tool results first
-      for (const block of toolResults) {
-        const text = block?.content?.[0]?.text || "";
-        try {
-          const parsed = JSON.parse(text);
-          const items = parsed.items || parsed.events || parsed || [];
-          if (Array.isArray(items)) {
-            items.forEach(ev => {
-              const s = ev.start?.dateTime || ev.start?.date;
-              const e = ev.end?.dateTime || ev.end?.date;
-              if (s && e) busy.push({ start: new Date(s), end: new Date(e) });
-            });
-          }
-        } catch {}
-      }
-
-      // Fallback: try text JSON
-      if (busy.length === 0 && textBlocks) {
-        try {
-          const clean = textBlocks.replace(/```json|```/g, "").trim();
-          const parsed = JSON.parse(clean);
-          const items = Array.isArray(parsed) ? parsed : (parsed.items || parsed.events || []);
-          items.forEach(ev => {
-            const s = ev.start?.dateTime || ev.start?.date || ev.start;
-            const e = ev.end?.dateTime || ev.end?.date || ev.end;
-            if (s && e) busy.push({ start: new Date(s), end: new Date(e) });
-          });
-        } catch {}
-      }
-
-      setBusySlots(busy);
-    })
-    .catch(() => setBusySlots([]))
-    .finally(() => setLoadingSlots(false));
+      .catch(() => setBusySlots([]))
+      .finally(() => setLoadingSlots(false));
   }, [selectedDay, calYear, calMonth]);
 
-  // Check if a given hour slot conflicts with any busy period (considering meeting duration)
   const isHourBusy = (h) => {
     if (!duration) return false;
     const slotStart = new Date(calYear, calMonth, selectedDay, h, 0, 0);
-    const slotEnd   = new Date(slotStart.getTime() + duration * 60000);
+    const slotEnd = new Date(slotStart.getTime() + duration * 60000);
     return busySlots.some(b => slotStart < b.end && slotEnd > b.start);
   };
 
-  // Also block last slot if meeting would run past 4 PM (end of day)
   const isOutsideHours = (h) => {
     if (!duration) return false;
     const slotEnd = new Date(calYear, calMonth, selectedDay, h, 0, 0).getTime() + duration * 60000;
-    const dayEnd  = new Date(calYear, calMonth, selectedDay, 16, 0, 0).getTime();
-    return slotEnd > dayEnd;
+    return slotEnd > new Date(calYear, calMonth, selectedDay, 16, 0, 0).getTime();
   };
 
   const selectedDate = selectedDay ? new Date(calYear, calMonth, selectedDay) : null;
@@ -139,49 +90,35 @@ export default function BookingPage() {
     setLoading(true); setError("");
     try {
       const start = new Date(calYear, calMonth, selectedDay, selectedHour, 0, 0);
-      const end   = new Date(start.getTime() + duration * 60000);
+      const end = new Date(start.getTime() + duration * 60000);
       const locationLabel = LOCATION_TYPES.find(l => l.id === selectedLocation)?.label || "";
 
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch(API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1000,
-          mcp_servers: [{ type: "url", url: "https://calendarmcp.googleapis.com/mcp/v1", name: "google-calendar" }],
-          system: `You are a calendar booking assistant for Kevin. Create the calendar event using the Google Calendar MCP tool. Respond only with JSON: {"success": true, "meetLink": "..."} or {"success": false, "error": "..."}. No other text.`,
-          messages: [{ role: "user", content: `Create a Google Calendar event:
-Title: "${selectedType?.label} with ${form.name}"
-Start: ${start.toISOString()}
-End: ${end.toISOString()}
-Location: ${locationLabel}
-Description: Meeting with ${form.name} (${form.email}). Format: ${locationLabel}. Notes: ${form.notes || "None"}. Booked via Kevin's scheduling page.
-${selectedLocation === "meet" ? "Add a Google Meet video conference link." : ""}
-Attendees: ${form.email}` }]
-        })
+          action: "book",
+          title: `${selectedType?.label} with ${form.name}`,
+          start: start.toISOString(),
+          end: end.toISOString(),
+          location: locationLabel,
+          description: `Meeting with ${form.name} (${form.email}). Format: ${locationLabel}. Notes: ${form.notes || "None"}. Booked via Kevin's scheduling page.`,
+          attendeeEmail: form.email,
+          addMeet: selectedLocation === "meet",
+        }),
       });
 
-      const data = await response.json();
-      const textBlocks = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-      const toolResults = (data.content || []).filter(b => b.type === "mcp_tool_result");
-      const hadToolUse  = (data.content || []).some(b => b.type === "mcp_tool_use");
+      const data = await res.json();
 
-      let meetLink = "";
-      if (toolResults.length > 0) {
-        const resultText = toolResults.map(r => r.content?.[0]?.text || "").join("");
-        const m = resultText.match(/https:\/\/meet\.google\.com\/[a-z\-]+/);
-        if (m) meetLink = m[0];
-        setBookedEvent({ start, end, meetLink, locationLabel }); setStep(5);
-      } else if (hadToolUse) {
-        setBookedEvent({ start, end, meetLink, locationLabel }); setStep(5);
+      if (data.success) {
+        setBookedEvent({ start, end, meetLink: data.meetLink || "", locationLabel });
+        setStep(5);
       } else {
-        try {
-          const parsed = JSON.parse(textBlocks.replace(/```json|```/g, "").trim());
-          if (parsed.success) { setBookedEvent({ start, end, meetLink: parsed.meetLink || "", locationLabel }); setStep(5); }
-          else setError(parsed.error || "Booking failed. Please try again.");
-        } catch { setError("Could not confirm booking. Please check your calendar or try again."); }
+        setError(data.error || "Booking failed. Please try again.");
       }
-    } catch { setError("Something went wrong. Please try again."); }
+    } catch {
+      setError("Something went wrong. Please try again.");
+    }
     setLoading(false);
   }
 
@@ -253,7 +190,7 @@ Attendees: ${form.email}` }]
                 </div>
               </div>
             )}
-            <button onClick={() => canProceed1 && setStep(2)} style={{ marginTop: 24, width: "100%", padding: "14px", borderRadius: 12, border: "none", background: canProceed1 ? "#2563EB" : "#E5E7EB", color: canProceed1 ? "#fff" : "#9CA3AF", fontWeight: 700, fontSize: 15, cursor: canProceed1 ? "pointer" : "not-allowed", transition: "all 0.2s" }}>
+            <button onClick={() => canProceed1 && setStep(2)} style={{ marginTop: 24, width: "100%", padding: "14px", borderRadius: 12, border: "none", background: canProceed1 ? "#2563EB" : "#E5E7EB", color: canProceed1 ? "#fff" : "#9CA3AF", fontWeight: 700, fontSize: 15, cursor: canProceed1 ? "pointer" : "not-allowed" }}>
               Choose a Time →
             </button>
           </div>
@@ -263,13 +200,11 @@ Attendees: ${form.email}` }]
         {step === 2 && (
           <div>
             <h2 style={{ fontSize: 17, fontWeight: 600, marginBottom: 16, color: "#374151" }}>Pick a date & time</h2>
-
-            {/* Calendar */}
             <div style={card}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-                <button onClick={prevMonth} style={{ background: "none", border: "none", color: "#2563EB", fontSize: 22, cursor: "pointer", padding: "0 4px" }}>‹</button>
-                <span style={{ fontWeight: 600, fontSize: 15, color: "#111827" }}>{MONTH_NAMES[calMonth]} {calYear}</span>
-                <button onClick={nextMonth} style={{ background: "none", border: "none", color: "#2563EB", fontSize: 22, cursor: "pointer", padding: "0 4px" }}>›</button>
+                <button onClick={prevMonth} style={{ background: "none", border: "none", color: "#2563EB", fontSize: 22, cursor: "pointer" }}>‹</button>
+                <span style={{ fontWeight: 600, fontSize: 15 }}>{MONTH_NAMES[calMonth]} {calYear}</span>
+                <button onClick={nextMonth} style={{ background: "none", border: "none", color: "#2563EB", fontSize: 22, cursor: "pointer" }}>›</button>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3, marginBottom: 6 }}>
                 {DAY_NAMES.map(d => <div key={d} style={{ textAlign: "center", fontSize: 11, color: "#9CA3AF", fontWeight: 600, padding: "3px 0" }}>{d}</div>)}
@@ -277,9 +212,7 @@ Attendees: ${form.email}` }]
               <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
                 {Array.from({ length: firstDay }).map((_, i) => <div key={`e${i}`} />)}
                 {Array.from({ length: daysInMonth }).map((_, i) => {
-                  const d = i + 1;
-                  const disabled = isPastDay(d) || isWeekend(d);
-                  const sel = selectedDay === d;
+                  const d = i + 1; const disabled = isPastDay(d) || isWeekend(d); const sel = selectedDay === d;
                   return (
                     <button key={d} onClick={() => !disabled && setSelectedDay(d)} style={{ padding: "8px 0", borderRadius: 8, border: "none", background: sel ? "#2563EB" : "transparent", color: disabled ? "#D1D5DB" : sel ? "#fff" : "#374151", fontWeight: sel ? 700 : 400, cursor: disabled ? "not-allowed" : "pointer", fontSize: 13 }}>{d}</button>
                   );
@@ -287,13 +220,10 @@ Attendees: ${form.email}` }]
               </div>
             </div>
 
-            {/* Time slots */}
             {selectedDay && (
               <div style={card}>
                 <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-                  <div style={{ fontSize: 13, color: "#6B7280", fontWeight: 500 }}>
-                    Available times — {MONTH_NAMES[calMonth]} {selectedDay}
-                  </div>
+                  <div style={{ fontSize: 13, color: "#6B7280", fontWeight: 500 }}>Available times — {MONTH_NAMES[calMonth]} {selectedDay}</div>
                   {loadingSlots && (
                     <div style={{ fontSize: 12, color: "#9CA3AF", display: "flex", alignItems: "center", gap: 5 }}>
                       <span style={{ display: "inline-block", width: 12, height: 12, border: "2px solid #E5E7EB", borderTopColor: "#2563EB", borderRadius: "50%", animation: "spin 0.7s linear infinite" }} />
@@ -302,23 +232,12 @@ Attendees: ${form.email}` }]
                   )}
                 </div>
                 <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
-
                 {!loadingSlots && (
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
                     {ALL_HOURS.map(h => {
-                      const busy = isHourBusy(h);
-                      const outside = isOutsideHours(h);
-                      const unavailable = busy || outside;
-                      const sel = selectedHour === h;
+                      const busy = isHourBusy(h); const outside = isOutsideHours(h); const unavailable = busy || outside; const sel = selectedHour === h;
                       return (
-                        <button key={h} onClick={() => !unavailable && setSelectedHour(h)} title={busy ? "Already booked" : outside ? "Would end after 4 PM" : ""} style={{
-                          padding: "11px 6px", borderRadius: 10,
-                          border: `2px solid ${sel ? "#2563EB" : unavailable ? "#F3F4F6" : "#E5E7EB"}`,
-                          background: sel ? "#EFF6FF" : unavailable ? "#F9FAFB" : "#fff",
-                          color: sel ? "#2563EB" : unavailable ? "#D1D5DB" : "#374151",
-                          fontWeight: sel ? 600 : 400, fontSize: 13, cursor: unavailable ? "not-allowed" : "pointer",
-                          position: "relative", transition: "all 0.15s",
-                        }}>
+                        <button key={h} onClick={() => !unavailable && setSelectedHour(h)} style={{ padding: "11px 6px", borderRadius: 10, border: `2px solid ${sel ? "#2563EB" : unavailable ? "#F3F4F6" : "#E5E7EB"}`, background: sel ? "#EFF6FF" : unavailable ? "#F9FAFB" : "#fff", color: sel ? "#2563EB" : unavailable ? "#D1D5DB" : "#374151", fontWeight: sel ? 600 : 400, fontSize: 13, cursor: unavailable ? "not-allowed" : "pointer", position: "relative" }}>
                           {formatHour(h)}
                           {busy && <div style={{ position: "absolute", top: 4, right: 6, width: 6, height: 6, borderRadius: "50%", background: "#EF4444" }} />}
                         </button>
@@ -326,18 +245,14 @@ Attendees: ${form.email}` }]
                     })}
                   </div>
                 )}
-
-                {/* Legend */}
                 {!loadingSlots && busySlots.length > 0 && (
                   <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#9CA3AF" }}>
-                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#EF4444" }} />
-                    Already booked
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#EF4444" }} /> Already booked
                   </div>
                 )}
               </div>
             )}
 
-            {/* Location */}
             {selectedHour !== null && (
               <div style={card}>
                 <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 12, fontWeight: 500 }}>How do you want to meet?</div>
@@ -379,7 +294,7 @@ Attendees: ${form.email}` }]
               ))}
               <div>
                 <label style={{ display: "block", fontSize: 13, color: "#6B7280", marginBottom: 6, fontWeight: 500 }}>Notes (optional)</label>
-                <textarea placeholder="What do you want to discuss? Any context helps." value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} rows={3}
+                <textarea placeholder="What do you want to discuss?" value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} rows={3}
                   style={{ width: "100%", padding: "11px 14px", borderRadius: 10, border: "1.5px solid #D1D5DB", background: "#fff", color: "#111827", fontSize: 15, boxSizing: "border-box", outline: "none", resize: "vertical", fontFamily: "inherit" }} />
               </div>
             </div>

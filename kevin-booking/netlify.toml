@@ -1,3 +1,17 @@
+[build]
+  base = "kevin-booking"
+  command = "npm run build"
+  publish = "kevin-booking/dist"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
