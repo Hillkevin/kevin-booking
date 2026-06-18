@@ -1,7 +1,7 @@
 [build]
   base = "kevin-booking"
   command = "npm run build"
-  publish = "kevin-booking/dist"
+  publish = "dist"
 
 [functions]
   directory = "netlify/functions"
