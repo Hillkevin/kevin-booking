@@ -13,13 +13,24 @@ const LOCATION_TYPES = [
   { id: "inperson", label: "In Person", icon: "📍" },
 ];
 
-const ALL_HOURS = [8, 9, 10, 11, 12, 13, 14, 15, 16];
+// Generate all 15-min slots from 8:00 AM to 4:00 PM (last slot 3:45 for 15-min meeting)
+const ALL_SLOTS = [];
+for (let h = 8; h < 16; h++) {
+  for (let m = 0; m < 60; m += 15) {
+    ALL_SLOTS.push({ h, m });
+  }
+}
+
 const MONTH_NAMES = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DAY_NAMES = ["Su","Mo","Tu","We","Th","Fr","Sa"];
 
 function getDaysInMonth(year, month) { return new Date(year, month + 1, 0).getDate(); }
 function getFirstDayOfMonth(year, month) { return new Date(year, month, 1).getDay(); }
-const formatHour = (h) => h === 12 ? "12:00 PM" : h < 12 ? `${h}:00 AM` : `${h - 12}:00 PM`;
+const formatSlot = ({ h, m }) => {
+  const period = h < 12 ? "AM" : "PM";
+  const hour = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  return `${hour}:${String(m).padStart(2, "0")} ${period}`;
+};
 
 const API = "/api/calendar";
 
@@ -32,7 +43,7 @@ export default function BookingPage() {
   const [calYear, setCalYear] = useState(today.getFullYear());
   const [calMonth, setCalMonth] = useState(today.getMonth());
   const [selectedDay, setSelectedDay] = useState(null);
-  const [selectedHour, setSelectedHour] = useState(null);
+  const [selectedSlot, setSelectedSlot] = useState(null); // {h, m}
   const [form, setForm] = useState({ name: "", email: "", notes: "" });
   const [loading, setLoading] = useState(false);
   const [bookedEvent, setBookedEvent] = useState(null);
@@ -47,14 +58,14 @@ export default function BookingPage() {
   const isPastDay = (d) => new Date(calYear, calMonth, d) < new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const isWeekend = (d) => { const day = new Date(calYear, calMonth, d).getDay(); return day === 0 || day === 6; };
 
-  const prevMonth = () => { if (calMonth === 0) { setCalMonth(11); setCalYear(y => y - 1); } else setCalMonth(m => m - 1); setSelectedDay(null); setSelectedHour(null); setBusySlots([]); };
-  const nextMonth = () => { if (calMonth === 11) { setCalMonth(0); setCalYear(y => y + 1); } else setCalMonth(m => m + 1); setSelectedDay(null); setSelectedHour(null); setBusySlots([]); };
+  const prevMonth = () => { if (calMonth === 0) { setCalMonth(11); setCalYear(y => y - 1); } else setCalMonth(m => m - 1); setSelectedDay(null); setSelectedSlot(null); setBusySlots([]); };
+  const nextMonth = () => { if (calMonth === 11) { setCalMonth(0); setCalYear(y => y + 1); } else setCalMonth(m => m + 1); setSelectedDay(null); setSelectedSlot(null); setBusySlots([]); };
 
   useEffect(() => {
     if (!selectedDay) return;
     setLoadingSlots(true);
     setBusySlots([]);
-    setSelectedHour(null);
+    setSelectedSlot(null);
 
     const dateStr = `${calYear}-${String(calMonth + 1).padStart(2, "0")}-${String(selectedDay).padStart(2, "0")}`;
 
@@ -71,16 +82,16 @@ export default function BookingPage() {
       .finally(() => setLoadingSlots(false));
   }, [selectedDay, calYear, calMonth]);
 
-  const isHourBusy = (h) => {
+  const isSlotBusy = ({ h, m }) => {
     if (!duration) return false;
-    const slotStart = new Date(calYear, calMonth, selectedDay, h, 0, 0);
+    const slotStart = new Date(calYear, calMonth, selectedDay, h, m, 0);
     const slotEnd = new Date(slotStart.getTime() + duration * 60000);
     return busySlots.some(b => slotStart < b.end && slotEnd > b.start);
   };
 
-  const isOutsideHours = (h) => {
+  const isSlotOutsideHours = ({ h, m }) => {
     if (!duration) return false;
-    const slotEnd = new Date(calYear, calMonth, selectedDay, h, 0, 0).getTime() + duration * 60000;
+    const slotEnd = new Date(calYear, calMonth, selectedDay, h, m, 0).getTime() + duration * 60000;
     return slotEnd > new Date(calYear, calMonth, selectedDay, 16, 0, 0).getTime();
   };
 
@@ -89,7 +100,7 @@ export default function BookingPage() {
   async function bookMeeting() {
     setLoading(true); setError("");
     try {
-      const start = new Date(calYear, calMonth, selectedDay, selectedHour, 0, 0);
+      const start = new Date(calYear, calMonth, selectedDay, selectedSlot.h, selectedSlot.m, 0);
       const end = new Date(start.getTime() + duration * 60000);
       const locationLabel = LOCATION_TYPES.find(l => l.id === selectedLocation)?.label || "";
 
@@ -123,7 +134,7 @@ export default function BookingPage() {
   }
 
   const canProceed1 = selectedType !== null && (selectedType.id !== "custom" || customDuration > 0);
-  const canProceed2 = selectedDay !== null && selectedHour !== null && selectedLocation !== null;
+  const canProceed2 = selectedDay !== null && selectedSlot !== null && selectedLocation !== null;
   const canProceed3 = form.name.trim() && form.email.includes("@");
 
   const card = { background: "#fff", borderRadius: 16, padding: 20, marginBottom: 16, border: "1px solid #E5E7EB", boxShadow: "0 1px 4px rgba(0,0,0,0.06)" };
@@ -233,13 +244,15 @@ export default function BookingPage() {
                 </div>
                 <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
                 {!loadingSlots && (
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
-                    {ALL_HOURS.map(h => {
-                      const busy = isHourBusy(h); const outside = isOutsideHours(h); const unavailable = busy || outside; const sel = selectedHour === h;
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+                    {ALL_SLOTS.map((slot, i) => {
+                      const busy = isSlotBusy(slot); const outside = isSlotOutsideHours(slot); const unavailable = busy || outside;
+                      const sel = selectedSlot?.h === slot.h && selectedSlot?.m === slot.m;
+                      if (outside && !busy) return null;
                       return (
-                        <button key={h} onClick={() => !unavailable && setSelectedHour(h)} style={{ padding: "11px 6px", borderRadius: 10, border: `2px solid ${sel ? "#2563EB" : unavailable ? "#F3F4F6" : "#E5E7EB"}`, background: sel ? "#EFF6FF" : unavailable ? "#F9FAFB" : "#fff", color: sel ? "#2563EB" : unavailable ? "#D1D5DB" : "#374151", fontWeight: sel ? 600 : 400, fontSize: 13, cursor: unavailable ? "not-allowed" : "pointer", position: "relative" }}>
-                          {formatHour(h)}
-                          {busy && <div style={{ position: "absolute", top: 4, right: 6, width: 6, height: 6, borderRadius: "50%", background: "#EF4444" }} />}
+                        <button key={i} onClick={() => !unavailable && setSelectedSlot(slot)} style={{ padding: "9px 4px", borderRadius: 8, border: `2px solid ${sel ? "#2563EB" : unavailable ? "#F3F4F6" : "#E5E7EB"}`, background: sel ? "#EFF6FF" : unavailable ? "#F9FAFB" : "#fff", color: sel ? "#2563EB" : unavailable ? "#D1D5DB" : "#374151", fontWeight: sel ? 600 : 400, fontSize: 12, cursor: unavailable ? "not-allowed" : "pointer", position: "relative" }}>
+                          {formatSlot(slot)}
+                          {busy && <div style={{ position: "absolute", top: 3, right: 5, width: 5, height: 5, borderRadius: "50%", background: "#EF4444" }} />}
                         </button>
                       );
                     })}
@@ -253,7 +266,7 @@ export default function BookingPage() {
               </div>
             )}
 
-            {selectedHour !== null && (
+            {selectedSlot !== null && (
               <div style={card}>
                 <div style={{ fontSize: 13, color: "#6B7280", marginBottom: 12, fontWeight: 500 }}>How do you want to meet?</div>
                 <div style={{ display: "flex", gap: 10 }}>
@@ -314,7 +327,7 @@ export default function BookingPage() {
                 { label: "Meeting", value: `${selectedType?.emoji} ${selectedType?.label}` },
                 { label: "Duration", value: `${duration} minutes` },
                 { label: "Date", value: selectedDate?.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }) },
-                { label: "Time", value: formatHour(selectedHour) },
+                { label: "Time", value: selectedSlot ? formatSlot(selectedSlot) : "" },
                 { label: "Format", value: LOCATION_TYPES.find(l => l.id === selectedLocation)?.label },
                 { label: "Name", value: form.name },
                 { label: "Email", value: form.email },
@@ -369,7 +382,7 @@ export default function BookingPage() {
                 </div>
               )}
             </div>
-            <button onClick={() => { setStep(1); setSelectedType(null); setSelectedDay(null); setSelectedHour(null); setSelectedLocation(null); setForm({ name: "", email: "", notes: "" }); setBookedEvent(null); setBusySlots([]); }}
+            <button onClick={() => { setStep(1); setSelectedType(null); setSelectedDay(null); setSelectedSlot(null); setSelectedLocation(null); setForm({ name: "", email: "", notes: "" }); setBookedEvent(null); setBusySlots([]); }}
               style={{ padding: "11px 24px", borderRadius: 12, border: "1px solid #D1D5DB", background: "#fff", color: "#6B7280", cursor: "pointer", fontSize: 14 }}>
               Book Another Meeting
             </button>
